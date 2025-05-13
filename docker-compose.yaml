@@ -1,0 +1,7 @@
+services:
+  telegram-sender:
+    build: .
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs     # persist logs
+    restart: unless-stopped
