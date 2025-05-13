@@ -4,7 +4,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 )
 
 // NewLogger creates a production-ready structured logger using Go's built-in log/slog.

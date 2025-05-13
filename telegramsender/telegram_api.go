@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sony/gobreaker"
@@ -297,9 +298,33 @@ func (t *TelegramAPI) isRetryable(err error) bool {
 }
 
 func extractTelegramError(err error) *TelegramResponse {
-	var telegramErr *TelegramResponse
-	if errors.As(err, &telegramErr) {
-		return telegramErr
+	// Check if the error message contains Telegram error information
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "telegram API error") {
+		// This is a best-effort extraction from our formatted error message
+		if strings.Contains(errMsg, "403") {
+			return &TelegramResponse{
+				OK:          false,
+				ErrorCode:   403,
+				Description: "Forbidden",
+			}
+		} else if strings.Contains(errMsg, "429") {
+			return &TelegramResponse{
+				OK:          false,
+				ErrorCode:   429,
+				Description: "Too Many Requests",
+			}
+		} else if strings.Contains(errMsg, "500") || 
+		          strings.Contains(errMsg, "502") || 
+		          strings.Contains(errMsg, "503") || 
+		          strings.Contains(errMsg, "504") {
+			return &TelegramResponse{
+				OK:          false,
+				ErrorCode:   500,
+				Description: "Server Error",
+			}
+		}
 	}
+	
 	return nil
 }
