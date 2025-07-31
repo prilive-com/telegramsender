@@ -48,22 +48,23 @@ func validateBotToken(token string) bool {
 	if len(token) < 10 || !strings.Contains(token, ":") {
 		return false
 	}
-	
+
 	parts := strings.Split(token, ":")
 	if len(parts) != 2 {
 		return false
 	}
-	
+
 	// Check if the first part is a number
 	_, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		return false
 	}
-	
+
 	// Check if the second part is of reasonable length (should be at least 30 chars for Telegram)
 	if len(parts[1]) < 30 {
 		return false
 	}
-	
+
 	return true
 }
+

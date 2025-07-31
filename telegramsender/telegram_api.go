@@ -36,7 +36,7 @@ type TelegramResponse struct {
 	Description string          `json:"description,omitempty"`
 	// RetryAfter is not part of the API response, but used internally
 	// to pass the Retry-After header value for rate limit handling
-	RetryAfter  time.Duration   `json:"-"`
+	RetryAfter time.Duration `json:"-"`
 }
 
 type MessageRequest struct {
@@ -61,10 +61,6 @@ type PhotoRequest struct {
 	DisableNotification bool        `json:"disable_notification,omitempty"`
 	ReplyToMessageID    int         `json:"reply_to_message_id,omitempty"`
 	ReplyMarkup         interface{} `json:"reply_markup,omitempty"`
-}
-
-type MessageResponse struct {
-	MessageID int `json:"message_id"`
 }
 
 /* ---------- constructor ---------- */
@@ -181,18 +177,18 @@ func (t *TelegramAPI) SendMessage(ctx context.Context, request MessageRequest) (
 			// Continue to next attempt
 		}
 	}
-	
+
 	// If we've exhausted all retries, return the last error
 	return nil, fmt.Errorf("max retries exceeded: %w", err)
 }
 
 // SendPhoto sends a photo to the specified chat
-func (t *TelegramAPI) SendPhoto(ctx context.Context, request PhotoRequest) (*MessageResponse, error) {
+func (t *TelegramAPI) SendPhoto(ctx context.Context, request PhotoRequest) (*MessageResult, error) {
 	if err := ValidateConfig(t.config); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	var result *MessageResponse
+	var result *MessageResult
 	var err error
 	var serverRetryDelay time.Duration
 
@@ -249,7 +245,7 @@ func (t *TelegramAPI) SendPhoto(ctx context.Context, request PhotoRequest) (*Mes
 			// Continue to next attempt
 		}
 	}
-	
+
 	// If we've exhausted all retries, return the last error
 	return nil, fmt.Errorf("max retries exceeded: %w", err)
 }
@@ -284,7 +280,7 @@ func (t *TelegramAPI) sendMessageOnce(ctx context.Context, request MessageReques
 	return &msgResult, nil
 }
 
-func (t *TelegramAPI) sendPhotoOnce(ctx context.Context, request PhotoRequest) (*MessageResponse, error) {
+func (t *TelegramAPI) sendPhotoOnce(ctx context.Context, request PhotoRequest) (*MessageResult, error) {
 	// Rate limit check
 	if err := t.limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limit exceeded: %w", err)
@@ -304,7 +300,7 @@ func (t *TelegramAPI) sendPhotoOnce(ctx context.Context, request PhotoRequest) (
 		return nil, fmt.Errorf("telegram API error: %d %s", telegramResp.ErrorCode, telegramResp.Description)
 	}
 
-	var msgResult MessageResponse
+	var msgResult MessageResult
 	if err := json.Unmarshal(telegramResp.Result, &msgResult); err != nil {
 		return nil, fmt.Errorf("failed to parse result: %w", err)
 	}
@@ -320,10 +316,10 @@ func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload
 
 	// Build the actual URL with the token
 	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken, method)
-	
+
 	// Create a redacted URL for logging that hides the token
 	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
-	
+
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request to %s: %w", redactedURL, err)
@@ -354,7 +350,7 @@ func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload
 	if !telegramResp.OK {
 		// Add the Retry-After header if present (for rate limiting responses)
 		retryAfter := resp.Header.Get("Retry-After")
-		
+
 		t.logger.Error("telegram API error",
 			"method", method,
 			"url", redactedURL,
@@ -362,7 +358,7 @@ func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload
 			"error_code", telegramResp.ErrorCode,
 			"description", telegramResp.Description,
 			"retry_after", retryAfter)
-		
+
 		// If this is a rate limit error and has a Retry-After header,
 		// attach it to the error to be used by retry logic
 		if telegramResp.ErrorCode == 429 && retryAfter != "" {
@@ -424,10 +420,10 @@ func extractTelegramError(err error) *TelegramResponse {
 				ErrorCode:   429,
 				Description: "Too Many Requests",
 			}
-		} else if strings.Contains(errMsg, "500") || 
-		          strings.Contains(errMsg, "502") || 
-		          strings.Contains(errMsg, "503") || 
-		          strings.Contains(errMsg, "504") {
+		} else if strings.Contains(errMsg, "500") ||
+			strings.Contains(errMsg, "502") ||
+			strings.Contains(errMsg, "503") ||
+			strings.Contains(errMsg, "504") {
 			return &TelegramResponse{
 				OK:          false,
 				ErrorCode:   500,
@@ -435,6 +431,7 @@ func extractTelegramError(err error) *TelegramResponse {
 			}
 		}
 	}
-	
+
 	return nil
 }
+

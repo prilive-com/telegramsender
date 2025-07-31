@@ -38,3 +38,4 @@ func NewLogger(logLevel slog.Level, logFilePath string) (*slog.Logger, error) {
 	logger := slog.New(handler)
 	return logger, nil
 }
+

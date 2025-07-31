@@ -8,32 +8,32 @@ import (
 
 type Config struct {
 	// API configuration
-	BotToken            string
-	BaseURL             string
-	
+	BotToken string
+	BaseURL  string
+
 	// HTTP client settings
-	RequestTimeout      time.Duration
-	KeepAlive           time.Duration
-	MaxIdleConns        int
-	IdleConnTimeout     time.Duration
-	
+	RequestTimeout  time.Duration
+	KeepAlive       time.Duration
+	MaxIdleConns    int
+	IdleConnTimeout time.Duration
+
 	// Rate limiting
-	RateLimitRequests   float64
-	RateLimitBurst      int
-	
+	RateLimitRequests float64
+	RateLimitBurst    int
+
 	// Circuit breaker
-	BreakerMaxRequests  uint32
-	BreakerInterval     time.Duration
-	BreakerTimeout      time.Duration
-	
+	BreakerMaxRequests uint32
+	BreakerInterval    time.Duration
+	BreakerTimeout     time.Duration
+
 	// Retry settings
 	MaxRetries          int
 	RetryInitialBackoff time.Duration
 	RetryMaxBackoff     time.Duration
 	RetryBackoffFactor  float64
-	
+
 	// Logging
-	LogFilePath         string
+	LogFilePath string
 }
 
 func LoadConfig() (*Config, error) {
@@ -103,27 +103,27 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return &Config{
-		BotToken:            getEnv("BOT_TOKEN", ""),
-		BaseURL:             getEnv("BASE_URL", "https://api.telegram.org"),
-		
-		RequestTimeout:      requestTimeout,
-		KeepAlive:           keepAlive,
-		MaxIdleConns:        maxIdleConns,
-		IdleConnTimeout:     idleConnTimeout,
-		
-		RateLimitRequests:   rateLimitRequests,
-		RateLimitBurst:      rateLimitBurst,
-		
-		BreakerMaxRequests:  uint32(breakerMaxRequests),
-		BreakerInterval:     breakerInterval,
-		BreakerTimeout:      breakerTimeout,
-		
+		BotToken: getEnv("BOT_TOKEN", ""),
+		BaseURL:  getEnv("BASE_URL", "https://api.telegram.org"),
+
+		RequestTimeout:  requestTimeout,
+		KeepAlive:       keepAlive,
+		MaxIdleConns:    maxIdleConns,
+		IdleConnTimeout: idleConnTimeout,
+
+		RateLimitRequests: rateLimitRequests,
+		RateLimitBurst:    rateLimitBurst,
+
+		BreakerMaxRequests: uint32(breakerMaxRequests),
+		BreakerInterval:    breakerInterval,
+		BreakerTimeout:     breakerTimeout,
+
 		MaxRetries:          maxRetries,
 		RetryInitialBackoff: retryInitialBackoff,
 		RetryMaxBackoff:     retryMaxBackoff,
 		RetryBackoffFactor:  retryBackoffFactor,
-		
-		LogFilePath:         getEnv("LOG_FILE_PATH", "logs/telegramsender.log"),
+
+		LogFilePath: getEnv("LOG_FILE_PATH", "logs/telegramsender.log"),
 	}, nil
 }
 
@@ -133,3 +133,4 @@ func getEnv(key, defaultValue string) string {
 	}
 	return defaultValue
 }
+

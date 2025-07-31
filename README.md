@@ -8,6 +8,7 @@
 
 | Capability            | Details                                                                                            |
 | --------------------- | -------------------------------------------------------------------------------------------------- |
+| Message Types         | Send text messages and photos with captions, HTML/Markdown formatting, and reply options           |
 | Resilient sender      | Retry with exponential backoff, circuit-breaker (sony/gobreaker), rate limiting (golang.org/x/time/rate) |
 | Performance           | Connection pooling, optimized HTTP client, efficient message handling                              |
 | Observability         | Go 1.24 `log/slog` JSON logs, structured errors                                                   |
@@ -35,6 +36,51 @@
   * Provides idempotent message sending
 * **Config**
   * Populated entirely from environment variables with sensible defaults
+
+---
+
+## 🚀 Usage
+
+### As a Library
+
+```go
+import "github.com/prilive-com/telegramsender/telegramsender"
+
+// Initialize
+cfg, _ := telegramsender.LoadConfig()
+logger, _ := telegramsender.NewLogger(slog.LevelInfo, cfg.LogFilePath)
+api := telegramsender.NewTelegramAPI(logger, cfg)
+
+// Send text message
+msgRequest := telegramsender.MessageRequest{
+    ChatID:    123456789,
+    Text:      "Hello, World!",
+    ParseMode: "HTML",
+}
+result, err := api.SendMessage(ctx, msgRequest)
+
+// Send photo
+photoRequest := telegramsender.PhotoRequest{
+    ChatID:    123456789,
+    Photo:     "https://example.com/photo.jpg", // or file_id
+    Caption:   "Beautiful photo! 📸",
+    ParseMode: "HTML",
+}
+result, err := api.SendPhoto(ctx, photoRequest)
+```
+
+### Example Application
+
+```bash
+# Send a test text message
+TEST_CHAT_ID=123456789 go run example/main.go send
+
+# Send a test photo
+TEST_CHAT_ID=123456789 go run example/main.go sendphoto
+
+# Send a custom photo
+TEST_CHAT_ID=123456789 TEST_PHOTO_URL="https://example.com/image.jpg" go run example/main.go sendphoto
+```
 
 ---
 
