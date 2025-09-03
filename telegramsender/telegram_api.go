@@ -558,8 +558,8 @@ func (t *TelegramAPI) executeMultipartRequest(ctx context.Context, method string
 		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	// Create the HTTP request
-	url := fmt.Sprintf("%s/%s", t.config.BaseURL, method)
+	// Create the HTTP request with bot token
+	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken, method)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -576,7 +576,7 @@ func (t *TelegramAPI) executeMultipartRequest(ctx context.Context, method string
 	defer resp.Body.Close()
 
 	// Redact sensitive information for logging
-	redactedURL := strings.ReplaceAll(url, t.config.BotToken, "<BOT_TOKEN>")
+	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
 	t.logger.Debug("telegram API request",
 		"method", method,
 		"url", redactedURL,
