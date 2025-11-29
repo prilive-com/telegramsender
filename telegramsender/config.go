@@ -32,6 +32,10 @@ type Config struct {
 	RetryMaxBackoff     time.Duration
 	RetryBackoffFactor  float64
 
+	// Content limits
+	MaxCaptionLength int // Maximum caption length in UTF-8 characters (default: 1024)
+	MaxFileSize      int // Maximum file size in bytes (default: 10MB)
+
 	// Logging
 	LogFilePath string
 }
@@ -102,6 +106,16 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	maxCaptionLength, err := strconv.Atoi(getEnv("MAX_CAPTION_LENGTH", "1024"))
+	if err != nil {
+		return nil, err
+	}
+
+	maxFileSize, err := strconv.Atoi(getEnv("MAX_FILE_SIZE", "10485760")) // 10MB default
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		BotToken: getEnv("BOT_TOKEN", ""),
 		BaseURL:  getEnv("BASE_URL", "https://api.telegram.org"),
@@ -122,6 +136,9 @@ func LoadConfig() (*Config, error) {
 		RetryInitialBackoff: retryInitialBackoff,
 		RetryMaxBackoff:     retryMaxBackoff,
 		RetryBackoffFactor:  retryBackoffFactor,
+
+		MaxCaptionLength: maxCaptionLength,
+		MaxFileSize:      maxFileSize,
 
 		LogFilePath: getEnv("LOG_FILE_PATH", "logs/telegramsender.log"),
 	}, nil

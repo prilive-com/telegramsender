@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sony/gobreaker"
 	"golang.org/x/time/rate"
@@ -275,14 +276,16 @@ func (t *TelegramAPI) SendPhotoFile(ctx context.Context, request PhotoFileReques
 		return nil, fmt.Errorf("failed to stat image file: %w", err)
 	}
 
-	// Check file size limit (10MB for standard bot API)
-	if fileInfo.Size() > 10*1024*1024 {
-		return nil, fmt.Errorf("image file exceeds 10MB limit: %d bytes", fileInfo.Size())
+	// Check file size limit (configurable, default 10MB for standard bot API)
+	if fileInfo.Size() > int64(t.config.MaxFileSize) {
+		return nil, fmt.Errorf("image file exceeds %d bytes limit: %d bytes", t.config.MaxFileSize, fileInfo.Size())
 	}
 
-	// Check caption length (1024 characters max)
-	if len(request.Caption) > 1024 {
-		return nil, fmt.Errorf("caption exceeds 1024 character limit: %d chars", len(request.Caption))
+	// Check caption length (configurable, default 1024 UTF-8 characters)
+	// Use utf8.RuneCountInString for proper Unicode character count (Cyrillic = 2 bytes per char)
+	captionLen := utf8.RuneCountInString(request.Caption)
+	if captionLen > t.config.MaxCaptionLength {
+		return nil, fmt.Errorf("caption exceeds %d character limit: %d chars", t.config.MaxCaptionLength, captionLen)
 	}
 
 	var result *MessageResult
