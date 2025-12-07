@@ -1,112 +1,168 @@
-# telegramsender
+# telegramsender v2
 
-**telegramsender** is a production‑ready, Go 1.24+ library and companion example application that lets you send Telegram bot messages with resilience, performance, and observability features for production environments in Docker or Kubernetes.
+> **Note**: v1.x is deprecated. Please use v2 for all new projects. See [MIGRATION.md](MIGRATION.md) for upgrade guide.
 
----
+**telegramsender** is a production-ready Go library for sending Telegram bot messages with resilience, security, and observability features.
 
-## ✨ What you get
+## Features
 
-| Capability            | Details                                                                                            |
-| --------------------- | -------------------------------------------------------------------------------------------------- |
-| Message Types         | Send text messages and photos with captions, HTML/Markdown formatting, and reply options           |
-| Resilient sender      | Retry with exponential backoff, circuit-breaker (sony/gobreaker), rate limiting (golang.org/x/time/rate) |
-| Performance           | Connection pooling, optimized HTTP client, efficient message handling                              |
-| Observability         | Go 1.24 `log/slog` JSON logs, structured errors                                                   |
-| Configurable          | Everything via env‑vars → Config struct (defaults supplied)                                        |
-| Container‑ready       | Multi‑stage Dockerfile, Docker‑Compose example, environment file sample                            |
-| Kubernetes‑native     | Ready for deployment in any CNCF-conformant cluster                                                |
+| Feature | Description |
+|---------|-------------|
+| **Message Types** | Text messages, photos (URL/file_id), local file uploads |
+| **Resilience** | Retry with exponential backoff, circuit breaker, per-chat rate limiting |
+| **Security** | TLS 1.2+, path traversal protection, URL whitelist, response size limits |
+| **Testability** | `Sender` interface for mocking, typed errors with `errors.As()` support |
+| **Observability** | Structured JSON logging via `log/slog` |
+| **Configuration** | Environment variables or programmatic with functional options |
 
----
-
-## 🏗️ Architecture
-
-```
-┌──────────────┐   Message Request    ┌──────────────┐   HTTP Client   ┌────────┐
-│Your App Logic│ ────────────────────▶│  TelegramAPI │ ───────────────▶│Telegram│
-└──────────────┘                      │ (rate‑limit) │                 └────────┘
-                                      │ (circuit‑br) │
-                                      │ (retry)      │
-                                      └──────────────┘
-```
-
-* **TelegramAPI**
-  * Manages HTTP connection pool
-  * Implements rate-limiting & circuit-breaking
-  * Handles retries with exponential backoff
-  * Provides idempotent message sending
-* **Config**
-  * Populated entirely from environment variables with sensible defaults
-
----
-
-## 🚀 Usage
-
-### As a Library
-
-```go
-import "github.com/prilive-com/telegramsender/telegramsender"
-
-// Initialize
-cfg, _ := telegramsender.LoadConfig()
-logger, _ := telegramsender.NewLogger(slog.LevelInfo, cfg.LogFilePath)
-api := telegramsender.NewTelegramAPI(logger, cfg)
-
-// Send text message
-msgRequest := telegramsender.MessageRequest{
-    ChatID:    123456789,
-    Text:      "Hello, World!",
-    ParseMode: "HTML",
-}
-result, err := api.SendMessage(ctx, msgRequest)
-
-// Send photo
-photoRequest := telegramsender.PhotoRequest{
-    ChatID:    123456789,
-    Photo:     "https://example.com/photo.jpg", // or file_id
-    Caption:   "Beautiful photo! 📸",
-    ParseMode: "HTML",
-}
-result, err := api.SendPhoto(ctx, photoRequest)
-```
-
-### Example Application
+## Installation
 
 ```bash
-# Send a test text message
-TEST_CHAT_ID=123456789 go run example/main.go send
-
-# Send a test photo
-TEST_CHAT_ID=123456789 go run example/main.go sendphoto
-
-# Send a custom photo
-TEST_CHAT_ID=123456789 TEST_PHOTO_URL="https://example.com/image.jpg" go run example/main.go sendphoto
+go get github.com/prilive-com/telegramsender/v2@latest
 ```
 
----
+Requires Go 1.24.3+
+
+## Quick Start
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "log/slog"
+    "time"
+
+    "github.com/prilive-com/telegramsender/v2/telegramsender"
+)
+
+func main() {
+    // Load config from environment
+    cfg, err := telegramsender.LoadConfig()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Create logger (MUST call Close() when done)
+    logger, err := telegramsender.NewLogger(slog.LevelInfo, cfg.LogFilePath)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer logger.Close()
+
+    // Validate config
+    if err := telegramsender.ValidateConfig(cfg); err != nil {
+        log.Fatal(err)
+    }
+
+    // Create API client
+    api := telegramsender.NewTelegramAPI(logger, cfg)
+
+    // Send message
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    result, err := api.SendMessage(ctx, telegramsender.MessageRequest{
+        ChatID:    123456789,
+        Text:      "<b>Hello</b> from telegramsender v2!",
+        ParseMode: "HTML",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    log.Printf("Message sent, ID: %d", result.MessageID)
+}
+```
+
+## Programmatic Configuration
+
+```go
+cfg := telegramsender.NewConfig(
+    "your-bot-token",
+    telegramsender.WithMaxRetries(5),
+    telegramsender.WithRateLimit(30, 60),
+    telegramsender.WithRequestTimeout(15*time.Second),
+    telegramsender.WithAllowedPhotoDirs("/app/uploads", "/tmp"),
+)
+```
+
+## Error Handling
+
+v2 provides typed errors for proper error handling:
+
+```go
+result, err := api.SendMessage(ctx, request)
+if err != nil {
+    var telegramErr *telegramsender.TelegramError
+    if errors.As(err, &telegramErr) {
+        log.Printf("Telegram error %d: %s", telegramErr.Code, telegramErr.Description)
+        if telegramErr.RetryAfter > 0 {
+            log.Printf("Retry after: %v", telegramErr.RetryAfter)
+        }
+    }
+
+    var validationErr *telegramsender.ValidationError
+    if errors.As(err, &validationErr) {
+        log.Printf("Validation failed on %s: %s", validationErr.Field, validationErr.Message)
+    }
+
+    // Sentinel errors
+    if errors.Is(err, telegramsender.ErrRateLimitExceeded) {
+        // Handle rate limit
+    }
+}
+```
+
+## Testing with Mocks
+
+```go
+type MockSender struct {
+    Messages []telegramsender.MessageRequest
+}
+
+func (m *MockSender) SendMessage(ctx context.Context, req telegramsender.MessageRequest) (*telegramsender.MessageResult, error) {
+    m.Messages = append(m.Messages, req)
+    return &telegramsender.MessageResult{MessageID: 123}, nil
+}
+
+// Use in your service
+type NotificationService struct {
+    sender telegramsender.Sender // Interface
+}
+```
 
 ## Environment Variables
 
-| Variable                    | Default                 | Description                                 |
-| --------------------------- | ----------------------- | ------------------------------------------- |
-| `BOT_TOKEN`                 | *(required)*            | Your Telegram Bot API token                 |
-| `BASE_URL`                  | `https://api.telegram.org` | Base URL for Telegram API                |
-| `LOG_FILE_PATH`             | `logs/telegramsender.log` | File plus JSON logs to stdout            |
-| `REQUEST_TIMEOUT`           | `10s`                   | Timeout for HTTP requests                   |
-| `KEEP_ALIVE`                | `30s`                   | HTTP keep-alive duration                    |
-| `MAX_IDLE_CONNS`            | `10`                    | Max idle connections in HTTP pool           |
-| `IDLE_CONN_TIMEOUT`         | `90s`                   | Idle connection timeout                     |
-| `RATE_LIMIT_REQUESTS`       | `10`                    | Allowed requests per second                 |
-| `RATE_LIMIT_BURST`          | `20`                    | Extra burst tokens                          |
-| `BREAKER_MAX_REQUESTS`      | `5`                     | Requests allowed in half‑open state         |
-| `BREAKER_INTERVAL`          | `2m`                    | Window that resets failure counters         |
-| `BREAKER_TIMEOUT`           | `60s`                   | How long breaker stays open                 |
-| `MAX_RETRIES`               | `3`                     | Maximum number of retries on failure        |
-| `RETRY_INITIAL_BACKOFF`     | `100ms`                 | Initial backoff time for first retry        |
-| `RETRY_MAX_BACKOFF`         | `10s`                   | Maximum backoff time for retries           |
-| `RETRY_BACKOFF_FACTOR`      | `2.0`                   | Multiplier for exponential backoff         |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BOT_TOKEN` | *(required)* | Telegram Bot API token |
+| `BASE_URL` | `https://api.telegram.org` | API base URL (whitelist enforced) |
+| `LOG_FILE_PATH` | `logs/telegramsender.log` | Log file path |
+| `REQUEST_TIMEOUT` | `10s` | HTTP request timeout |
+| `MAX_RETRIES` | `3` | Max retry attempts |
+| `RATE_LIMIT_REQUESTS` | `10` | Requests per second (global) |
+| `RATE_LIMIT_BURST` | `20` | Burst size |
+| `MAX_CAPTION_LENGTH` | `1024` | Max caption UTF-8 chars |
+| `MAX_FILE_SIZE` | `10485760` | Max file size (10MB) |
 
----
+See [env.example](env.example) for full list.
 
-## 📜 License
+## Security Features
+
+- **TLS 1.2+** enforced for all connections
+- **Path traversal protection** for file uploads
+- **URL whitelist** prevents redirect attacks
+- **Response size limits** prevent memory exhaustion
+- **Cryptographic jitter** prevents thundering herd
+
+## Documentation
+
+- [CHANGELOG.md](CHANGELOG.md) - Version history
+- [MIGRATION.md](MIGRATION.md) - v1 to v2 migration guide
+- [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) - Integration patterns
+
+## License
 
 MIT © 2025 Prilive Com

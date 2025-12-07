@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prilive-com/telegramsender/telegramsender"
+	"github.com/prilive-com/telegramsender/v2/telegramsender"
 )
 
 func main() {
@@ -38,6 +38,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
+	defer logger.Close() // Properly close log file handle
 
 	// Initialize Telegram API client
 	telegramAPI := telegramsender.NewTelegramAPI(logger, cfg)

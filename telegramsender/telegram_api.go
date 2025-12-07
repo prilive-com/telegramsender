@@ -3,21 +3,22 @@ package telegramsender
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math"
+	"math/big"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sony/gobreaker"
 	"golang.org/x/time/rate"
@@ -25,24 +26,27 @@ import (
 
 /* ---------- types ---------- */
 
+// TelegramAPI is the main client for sending messages via Telegram Bot API.
+// It implements the Sender interface.
 type TelegramAPI struct {
-	logger     *slog.Logger
-	config     *Config
-	httpClient *http.Client
-	limiter    *rate.Limiter
-	breaker    *gobreaker.CircuitBreaker
+	logger       *Logger
+	config       *Config
+	httpClient   HTTPClient
+	globalLimiter *rate.Limiter
+	chatLimiters map[int64]*rate.Limiter
+	limiterMu    sync.RWMutex
+	breaker      *gobreaker.CircuitBreaker
 }
 
+// TelegramResponse represents a response from the Telegram API.
 type TelegramResponse struct {
 	OK          bool            `json:"ok"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	ErrorCode   int             `json:"error_code,omitempty"`
 	Description string          `json:"description,omitempty"`
-	// RetryAfter is not part of the API response, but used internally
-	// to pass the Retry-After header value for rate limit handling
-	RetryAfter time.Duration `json:"-"`
 }
 
+// MessageRequest represents a request to send a text message.
 type MessageRequest struct {
 	ChatID                int64       `json:"chat_id"`
 	Text                  string      `json:"text"`
@@ -53,10 +57,12 @@ type MessageRequest struct {
 	ReplyMarkup           interface{} `json:"reply_markup,omitempty"`
 }
 
+// MessageResult represents the result of a sent message.
 type MessageResult struct {
 	MessageID int `json:"message_id"`
 }
 
+// PhotoRequest represents a request to send a photo by URL or file_id.
 type PhotoRequest struct {
 	ChatID              int64       `json:"chat_id"`
 	Photo               string      `json:"photo"`
@@ -67,9 +73,10 @@ type PhotoRequest struct {
 	ReplyMarkup         interface{} `json:"reply_markup,omitempty"`
 }
 
+// PhotoFileRequest represents a request to send a local photo file.
 type PhotoFileRequest struct {
 	ChatID              int64
-	PhotoPath           string      // Path to the local photo file
+	PhotoPath           string
 	Caption             string
 	ParseMode           string
 	DisableNotification bool
@@ -79,17 +86,21 @@ type PhotoFileRequest struct {
 
 /* ---------- constructor ---------- */
 
-func NewTelegramAPI(logger *slog.Logger, config *Config) *TelegramAPI {
-	// Configure transport for connection pooling
+// NewTelegramAPI creates a new TelegramAPI client with the given configuration.
+func NewTelegramAPI(logger *Logger, config *Config) *TelegramAPI {
+	// Configure transport with TLS 1.2+ minimum
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
+			Timeout:   DefaultDialTimeout,
 			KeepAlive: config.KeepAlive,
 		}).DialContext,
 		MaxIdleConns:        config.MaxIdleConns,
 		IdleConnTimeout:     config.IdleConnTimeout,
-		TLSHandshakeTimeout: 10 * time.Second,
+		TLSHandshakeTimeout: DefaultTLSHandshakeTimeout,
 		ForceAttemptHTTP2:   true,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
 
 	// Configure HTTP client
@@ -105,9 +116,8 @@ func NewTelegramAPI(logger *slog.Logger, config *Config) *TelegramAPI {
 		Interval:    config.BreakerInterval,
 		Timeout:     config.BreakerTimeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			// Trip the circuit breaker when error rate exceeds 50%
-			// and we have at least 5 requests
-			return counts.Requests > 5 && float64(counts.TotalFailures)/float64(counts.Requests) >= 0.5
+			return counts.Requests > BreakerMinRequests &&
+				float64(counts.TotalFailures)/float64(counts.Requests) >= BreakerErrorThreshold
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
 			logger.Info("circuit breaker state changed",
@@ -118,183 +128,87 @@ func NewTelegramAPI(logger *slog.Logger, config *Config) *TelegramAPI {
 	}
 
 	return &TelegramAPI{
-		logger:     logger,
-		config:     config,
-		httpClient: httpClient,
-		limiter:    rate.NewLimiter(rate.Limit(config.RateLimitRequests), config.RateLimitBurst),
-		breaker:    gobreaker.NewCircuitBreaker(cbSettings),
+		logger:        logger,
+		config:        config,
+		httpClient:    httpClient,
+		globalLimiter: rate.NewLimiter(rate.Limit(config.RateLimitRequests), config.RateLimitBurst),
+		chatLimiters:  make(map[int64]*rate.Limiter),
+		breaker:       gobreaker.NewCircuitBreaker(cbSettings),
 	}
 }
 
 /* ---------- public methods ---------- */
 
-// SendMessage sends a text message to the specified chat
+// SendMessage sends a text message to the specified chat.
 func (t *TelegramAPI) SendMessage(ctx context.Context, request MessageRequest) (*MessageResult, error) {
 	if err := ValidateConfig(t.config); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	var result *MessageResult
-	var err error
-	var serverRetryDelay time.Duration
-
-	// Apply retry with exponential backoff
-	for attempt := 0; attempt <= t.config.MaxRetries; attempt++ {
-		// Main request (first attempt or after backoff)
-		result, err = t.sendMessageOnce(ctx, request)
-		if err == nil {
-			return result, nil
-		}
-
-		// Exit early if this is the last attempt
-		if attempt == t.config.MaxRetries {
-			break
-		}
-
-		// Check if the error is retryable
-		if !t.isRetryable(err) {
-			t.logger.Error("non-retryable error",
-				"error", err,
-				"attempt", attempt)
-			return nil, err
-		}
-
-		// Check for rate limit response with Retry-After header
-		var telegramErr *TelegramResponse
-		if errors.As(err, &telegramErr) && telegramErr.RetryAfter > 0 {
-			serverRetryDelay = telegramErr.RetryAfter
-			t.logger.Warn("received rate limit response",
-				"retry_after", serverRetryDelay.String(),
-				"attempt", attempt)
-		} else {
-			serverRetryDelay = 0
-		}
-
-		// Determine backoff time for next attempt
-		var backoff time.Duration
-		if serverRetryDelay > 0 {
-			backoff = serverRetryDelay
-		} else {
-			backoff = t.calculateBackoff(attempt + 1)
-		}
-
-		t.logger.Info("retrying request",
-			"attempt", attempt+1,
-			"backoff", backoff.String(),
-			"using_server_delay", serverRetryDelay > 0)
-
-		// Wait for backoff period or context cancellation
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(backoff):
-			// Continue to next attempt
-		}
+	if err := ValidateMessageRequest(request); err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 
-	// If we've exhausted all retries, return the last error
-	return nil, fmt.Errorf("max retries exceeded: %w", err)
+	return t.withRetry(ctx, request.ChatID, func() (*MessageResult, error) {
+		return t.sendMessageOnce(ctx, request)
+	})
 }
 
-// SendPhoto sends a photo to the specified chat
+// SendPhoto sends a photo by URL or file_id to the specified chat.
 func (t *TelegramAPI) SendPhoto(ctx context.Context, request PhotoRequest) (*MessageResult, error) {
 	if err := ValidateConfig(t.config); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	var result *MessageResult
-	var err error
-	var serverRetryDelay time.Duration
-
-	// Apply retry with exponential backoff
-	for attempt := 0; attempt <= t.config.MaxRetries; attempt++ {
-		// Main request (first attempt or after backoff)
-		result, err = t.sendPhotoOnce(ctx, request)
-		if err == nil {
-			return result, nil
-		}
-
-		// Exit early if this is the last attempt
-		if attempt == t.config.MaxRetries {
-			break
-		}
-
-		// Check if the error is retryable
-		if !t.isRetryable(err) {
-			t.logger.Error("non-retryable error",
-				"error", err,
-				"attempt", attempt)
-			return nil, err
-		}
-
-		// Check for rate limit response with Retry-After header
-		var telegramErr *TelegramResponse
-		if errors.As(err, &telegramErr) && telegramErr.RetryAfter > 0 {
-			serverRetryDelay = telegramErr.RetryAfter
-			t.logger.Warn("received rate limit response",
-				"retry_after", serverRetryDelay.String(),
-				"attempt", attempt)
-		} else {
-			serverRetryDelay = 0
-		}
-
-		// Determine backoff time for next attempt
-		var backoff time.Duration
-		if serverRetryDelay > 0 {
-			backoff = serverRetryDelay
-		} else {
-			backoff = t.calculateBackoff(attempt + 1)
-		}
-
-		t.logger.Info("retrying request",
-			"attempt", attempt+1,
-			"backoff", backoff.String(),
-			"using_server_delay", serverRetryDelay > 0)
-
-		// Wait for backoff period or context cancellation
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(backoff):
-			// Continue to next attempt
-		}
+	if err := ValidatePhotoRequest(request); err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 
-	// If we've exhausted all retries, return the last error
-	return nil, fmt.Errorf("max retries exceeded: %w", err)
+	return t.withRetry(ctx, request.ChatID, func() (*MessageResult, error) {
+		return t.sendPhotoOnce(ctx, request)
+	})
 }
 
-// SendPhotoFile sends a photo file from local filesystem to the specified chat
+// SendPhotoFile sends a local photo file to the specified chat.
 func (t *TelegramAPI) SendPhotoFile(ctx context.Context, request PhotoFileRequest) (*MessageResult, error) {
 	if err := ValidateConfig(t.config); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	// Validate file exists and check size
+	if err := ValidatePhotoFileRequest(request, t.config.MaxCaptionLength); err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
+	}
+
+	// Validate photo path for security
+	if err := ValidatePhotoPath(request.PhotoPath, t.config.AllowedPhotoDirs); err != nil {
+		return nil, fmt.Errorf("photo path validation failed: %w", err)
+	}
+
+	// Check file exists and size
 	fileInfo, err := os.Stat(request.PhotoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat image file: %w", err)
 	}
 
-	// Check file size limit (configurable, default 10MB for standard bot API)
 	if fileInfo.Size() > int64(t.config.MaxFileSize) {
-		return nil, fmt.Errorf("image file exceeds %d bytes limit: %d bytes", t.config.MaxFileSize, fileInfo.Size())
+		return nil, NewValidationError("photo_path",
+			fmt.Sprintf("file exceeds %d bytes limit: %d bytes", t.config.MaxFileSize, fileInfo.Size()))
 	}
 
-	// Check caption length (configurable, default 1024 UTF-8 characters)
-	// Use utf8.RuneCountInString for proper Unicode character count (Cyrillic = 2 bytes per char)
-	captionLen := utf8.RuneCountInString(request.Caption)
-	if captionLen > t.config.MaxCaptionLength {
-		return nil, fmt.Errorf("caption exceeds %d character limit: %d chars", t.config.MaxCaptionLength, captionLen)
-	}
+	return t.withRetry(ctx, request.ChatID, func() (*MessageResult, error) {
+		return t.sendPhotoFileOnce(ctx, request)
+	})
+}
 
+/* ---------- retry logic (extracted to eliminate duplication) ---------- */
+
+// withRetry executes an operation with retry logic and exponential backoff.
+func (t *TelegramAPI) withRetry(ctx context.Context, chatID int64, operation func() (*MessageResult, error)) (*MessageResult, error) {
 	var result *MessageResult
-	var serverRetryDelay time.Duration
+	var err error
 
-	// Apply retry with exponential backoff
 	for attempt := 0; attempt <= t.config.MaxRetries; attempt++ {
-		// Main request (first attempt or after backoff)
-		result, err = t.sendPhotoFileOnce(ctx, request)
+		result, err = operation()
 		if err == nil {
 			return result, nil
 		}
@@ -312,29 +226,13 @@ func (t *TelegramAPI) SendPhotoFile(ctx context.Context, request PhotoFileReques
 			return nil, err
 		}
 
-		// Check for rate limit response with Retry-After header
-		var telegramErr *TelegramResponse
-		if errors.As(err, &telegramErr) && telegramErr.RetryAfter > 0 {
-			serverRetryDelay = telegramErr.RetryAfter
-			t.logger.Warn("received rate limit response",
-				"retry_after", serverRetryDelay.String(),
-				"attempt", attempt)
-		} else {
-			serverRetryDelay = 0
-		}
-
-		// Determine backoff time for next attempt
-		var backoff time.Duration
-		if serverRetryDelay > 0 {
-			backoff = serverRetryDelay
-		} else {
-			backoff = t.calculateBackoff(attempt + 1)
-		}
+		// Determine backoff time
+		backoff := t.determineBackoff(attempt+1, err)
 
 		t.logger.Info("retrying request",
 			"attempt", attempt+1,
 			"backoff", backoff.String(),
-			"using_server_delay", serverRetryDelay > 0)
+			"chat_id", chatID)
 
 		// Wait for backoff period or context cancellation
 		select {
@@ -345,58 +243,110 @@ func (t *TelegramAPI) SendPhotoFile(ctx context.Context, request PhotoFileReques
 		}
 	}
 
-	// If we've exhausted all retries, return the last error
-	return nil, fmt.Errorf("max retries exceeded: %w", err)
+	return nil, fmt.Errorf("%w: %v", ErrMaxRetriesExceeded, err)
+}
+
+// determineBackoff calculates the backoff duration, respecting server-provided retry-after.
+func (t *TelegramAPI) determineBackoff(attempt int, err error) time.Duration {
+	// Check for Telegram error with RetryAfter
+	var telegramErr *TelegramError
+	if errors.As(err, &telegramErr) && telegramErr.RetryAfter > 0 {
+		return telegramErr.RetryAfter
+	}
+
+	return t.calculateBackoff(attempt)
 }
 
 /* ---------- private methods ---------- */
 
 func (t *TelegramAPI) sendMessageOnce(ctx context.Context, request MessageRequest) (*MessageResult, error) {
-	// Rate limit check
-	if err := t.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit exceeded: %w", err)
+	// Per-chat rate limit
+	if err := t.waitForChatRateLimit(ctx, request.ChatID); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRateLimitExceeded, err)
+	}
+
+	// Global rate limit
+	if err := t.globalLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRateLimitExceeded, err)
 	}
 
 	// Use circuit breaker
 	resp, err := t.breaker.Execute(func() (interface{}, error) {
-		return t.executeRequest(ctx, "sendMessage", request)
+		return t.executeRequest(ctx, MethodSendMessage, request)
 	})
 
 	if err != nil {
+		// Check if it's a circuit breaker error
+		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+			return nil, fmt.Errorf("%w: %v", ErrCircuitBreakerOpen, err)
+		}
 		return nil, err
 	}
 
-	telegramResp := resp.(*TelegramResponse)
-	if !telegramResp.OK {
-		return nil, fmt.Errorf("telegram API error: %d %s", telegramResp.ErrorCode, telegramResp.Description)
-	}
-
-	var msgResult MessageResult
-	if err := json.Unmarshal(telegramResp.Result, &msgResult); err != nil {
-		return nil, fmt.Errorf("failed to parse result: %w", err)
-	}
-
-	return &msgResult, nil
+	return t.parseMessageResult(resp)
 }
 
 func (t *TelegramAPI) sendPhotoOnce(ctx context.Context, request PhotoRequest) (*MessageResult, error) {
-	// Rate limit check
-	if err := t.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit exceeded: %w", err)
+	// Per-chat rate limit
+	if err := t.waitForChatRateLimit(ctx, request.ChatID); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRateLimitExceeded, err)
+	}
+
+	// Global rate limit
+	if err := t.globalLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRateLimitExceeded, err)
 	}
 
 	// Use circuit breaker
 	resp, err := t.breaker.Execute(func() (interface{}, error) {
-		return t.executeRequest(ctx, "sendPhoto", request)
+		return t.executeRequest(ctx, MethodSendPhoto, request)
 	})
 
 	if err != nil {
+		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+			return nil, fmt.Errorf("%w: %v", ErrCircuitBreakerOpen, err)
+		}
 		return nil, err
 	}
 
-	telegramResp := resp.(*TelegramResponse)
+	return t.parseMessageResult(resp)
+}
+
+func (t *TelegramAPI) sendPhotoFileOnce(ctx context.Context, request PhotoFileRequest) (*MessageResult, error) {
+	// Per-chat rate limit
+	if err := t.waitForChatRateLimit(ctx, request.ChatID); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRateLimitExceeded, err)
+	}
+
+	// Global rate limit
+	if err := t.globalLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRateLimitExceeded, err)
+	}
+
+	// Use circuit breaker
+	resp, err := t.breaker.Execute(func() (interface{}, error) {
+		return t.executeMultipartRequest(ctx, MethodSendPhoto, request)
+	})
+
+	if err != nil {
+		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+			return nil, fmt.Errorf("%w: %v", ErrCircuitBreakerOpen, err)
+		}
+		return nil, err
+	}
+
+	return t.parseMessageResult(resp)
+}
+
+// parseMessageResult safely parses the response into MessageResult.
+func (t *TelegramAPI) parseMessageResult(resp interface{}) (*MessageResult, error) {
+	telegramResp, ok := resp.(*TelegramResponse)
+	if !ok {
+		return nil, errors.New("unexpected response type from circuit breaker")
+	}
+
 	if !telegramResp.OK {
-		return nil, fmt.Errorf("telegram API error: %d %s", telegramResp.ErrorCode, telegramResp.Description)
+		return nil, NewTelegramError(telegramResp.ErrorCode, telegramResp.Description)
 	}
 
 	var msgResult MessageResult
@@ -407,32 +357,34 @@ func (t *TelegramAPI) sendPhotoOnce(ctx context.Context, request PhotoRequest) (
 	return &msgResult, nil
 }
 
-func (t *TelegramAPI) sendPhotoFileOnce(ctx context.Context, request PhotoFileRequest) (*MessageResult, error) {
-	// Rate limit check
-	if err := t.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit exceeded: %w", err)
+// waitForChatRateLimit waits for the per-chat rate limiter.
+func (t *TelegramAPI) waitForChatRateLimit(ctx context.Context, chatID int64) error {
+	limiter := t.getChatLimiter(chatID)
+	return limiter.Wait(ctx)
+}
+
+// getChatLimiter returns or creates a rate limiter for a specific chat.
+func (t *TelegramAPI) getChatLimiter(chatID int64) *rate.Limiter {
+	t.limiterMu.RLock()
+	limiter, exists := t.chatLimiters[chatID]
+	t.limiterMu.RUnlock()
+
+	if exists {
+		return limiter
 	}
 
-	// Use circuit breaker
-	resp, err := t.breaker.Execute(func() (interface{}, error) {
-		return t.executeMultipartRequest(ctx, "sendPhoto", request)
-	})
+	t.limiterMu.Lock()
+	defer t.limiterMu.Unlock()
 
-	if err != nil {
-		return nil, err
+	// Double-check after acquiring write lock
+	if limiter, exists = t.chatLimiters[chatID]; exists {
+		return limiter
 	}
 
-	telegramResp := resp.(*TelegramResponse)
-	if !telegramResp.OK {
-		return nil, fmt.Errorf("telegram API error: %d %s", telegramResp.ErrorCode, telegramResp.Description)
-	}
-
-	var msgResult MessageResult
-	if err := json.Unmarshal(telegramResp.Result, &msgResult); err != nil {
-		return nil, fmt.Errorf("failed to parse result: %w", err)
-	}
-
-	return &msgResult, nil
+	// Create new limiter for this chat
+	limiter = rate.NewLimiter(rate.Limit(PerChatRateLimit), PerChatBurst)
+	t.chatLimiters[chatID] = limiter
+	return limiter
 }
 
 func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload interface{}) (*TelegramResponse, error) {
@@ -441,10 +393,7 @@ func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Build the actual URL with the token
 	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken, method)
-
-	// Create a redacted URL for logging that hides the token
 	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
@@ -461,144 +410,103 @@ func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Parse response
-	var telegramResp TelegramResponse
-	if err := json.Unmarshal(body, &telegramResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	// Handle non-OK responses as errors
-	if !telegramResp.OK {
-		// Add the Retry-After header if present (for rate limiting responses)
-		retryAfter := resp.Header.Get("Retry-After")
-
-		t.logger.Error("telegram API error",
-			"method", method,
-			"url", redactedURL,
-			"status_code", resp.StatusCode,
-			"error_code", telegramResp.ErrorCode,
-			"description", telegramResp.Description,
-			"retry_after", retryAfter)
-
-		// If this is a rate limit error and has a Retry-After header,
-		// attach it to the error to be used by retry logic
-		if telegramResp.ErrorCode == 429 && retryAfter != "" {
-			// Parse the Retry-After value (in seconds)
-			if seconds, err := strconv.Atoi(retryAfter); err == nil {
-				telegramResp.RetryAfter = time.Duration(seconds) * time.Second
-			}
-		}
-	}
-
-	return &telegramResp, nil
+	return t.parseResponse(resp, method, redactedURL)
 }
 
 func (t *TelegramAPI) executeMultipartRequest(ctx context.Context, method string, request PhotoFileRequest) (*TelegramResponse, error) {
-	// Create multipart form data
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	// Add chat_id field
+	// Add form fields
 	if err := writer.WriteField("chat_id", strconv.FormatInt(request.ChatID, 10)); err != nil {
 		return nil, fmt.Errorf("failed to write chat_id: %w", err)
 	}
 
-	// Add caption if provided
 	if request.Caption != "" {
 		if err := writer.WriteField("caption", request.Caption); err != nil {
 			return nil, fmt.Errorf("failed to write caption: %w", err)
 		}
 	}
 
-	// Add parse_mode if provided
 	if request.ParseMode != "" {
 		if err := writer.WriteField("parse_mode", request.ParseMode); err != nil {
 			return nil, fmt.Errorf("failed to write parse_mode: %w", err)
 		}
 	}
 
-	// Add disable_notification if set
 	if request.DisableNotification {
 		if err := writer.WriteField("disable_notification", "true"); err != nil {
 			return nil, fmt.Errorf("failed to write disable_notification: %w", err)
 		}
 	}
 
-	// Add reply_to_message_id if provided
 	if request.ReplyToMessageID > 0 {
 		if err := writer.WriteField("reply_to_message_id", strconv.Itoa(request.ReplyToMessageID)); err != nil {
 			return nil, fmt.Errorf("failed to write reply_to_message_id: %w", err)
 		}
 	}
 
-	// Open the image file
+	// Open and copy file
 	file, err := os.Open(request.PhotoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open image file: %w", err)
 	}
 	defer file.Close()
 
-	// Create form file part
 	part, err := writer.CreateFormFile("photo", filepath.Base(request.PhotoPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create form file: %w", err)
 	}
 
-	// Copy file contents to form with buffer for efficiency
-	buf := make([]byte, 32*1024) // 32KB buffer
+	buf := make([]byte, FileReadBufferSize)
 	if _, err := io.CopyBuffer(part, file, buf); err != nil {
 		return nil, fmt.Errorf("failed to copy file contents: %w", err)
 	}
 
-	// Close multipart writer to finalize the form data
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	// Create the HTTP request with bot token
 	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken, method)
+	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
+
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set content type with boundary
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	// Perform the request
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Redact sensitive information for logging
-	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
-	t.logger.Debug("telegram API request",
-		"method", method,
-		"url", redactedURL,
-		"status_code", resp.StatusCode)
+	return t.parseResponse(resp, method, redactedURL)
+}
 
-	// Read and parse the response
-	respBody, err := io.ReadAll(resp.Body)
+// parseResponse reads and parses the HTTP response with size limits.
+func (t *TelegramAPI) parseResponse(resp *http.Response, method, redactedURL string) (*TelegramResponse, error) {
+	// Limit response size to prevent memory exhaustion
+	limitedReader := io.LimitReader(resp.Body, MaxResponseSize)
+	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Check if response was truncated
+	if len(body) == MaxResponseSize {
+		return nil, ErrResponseTooLarge
+	}
+
 	var telegramResp TelegramResponse
-	if err := json.Unmarshal(respBody, &telegramResp); err != nil {
+	if err := json.Unmarshal(body, &telegramResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Handle non-OK responses as errors
+	// Handle error responses
 	if !telegramResp.OK {
-		// Add the Retry-After header if present (for rate limiting responses)
 		retryAfter := resp.Header.Get("Retry-After")
 
 		t.logger.Error("telegram API error",
@@ -609,79 +517,61 @@ func (t *TelegramAPI) executeMultipartRequest(ctx context.Context, method string
 			"description", telegramResp.Description,
 			"retry_after", retryAfter)
 
-		// If this is a rate limit error and has a Retry-After header,
-		// attach it to the error to be used by retry logic
+		// Return typed error that can be used with errors.As
 		if telegramResp.ErrorCode == 429 && retryAfter != "" {
-			// Parse the Retry-After value (in seconds)
 			if seconds, err := strconv.Atoi(retryAfter); err == nil {
-				telegramResp.RetryAfter = time.Duration(seconds) * time.Second
+				return nil, NewTelegramErrorWithRetry(
+					telegramResp.ErrorCode,
+					telegramResp.Description,
+					time.Duration(seconds)*time.Second,
+				)
 			}
 		}
+
+		return nil, NewTelegramError(telegramResp.ErrorCode, telegramResp.Description)
 	}
 
 	return &telegramResp, nil
 }
 
+// calculateBackoff calculates exponential backoff with random jitter.
 func (t *TelegramAPI) calculateBackoff(attempt int) time.Duration {
 	backoff := t.config.RetryInitialBackoff * time.Duration(math.Pow(t.config.RetryBackoffFactor, float64(attempt-1)))
 	if backoff > t.config.RetryMaxBackoff {
 		backoff = t.config.RetryMaxBackoff
 	}
-	// Add jitter (±20%)
-	jitter := time.Duration(float64(backoff) * (0.8 + 0.4*float64(attempt%2)))
-	return jitter
+
+	// Add random jitter (±20%) using crypto/rand for security
+	jitterRange := int64(float64(backoff) * (JitterMax - JitterMin))
+	if jitterRange > 0 {
+		randomJitter, err := rand.Int(rand.Reader, big.NewInt(jitterRange))
+		if err == nil {
+			baseJitter := time.Duration(float64(backoff) * JitterMin)
+			return baseJitter + time.Duration(randomJitter.Int64())
+		}
+	}
+
+	return backoff
 }
 
+// isRetryable determines if an error is retryable.
 func (t *TelegramAPI) isRetryable(err error) bool {
+	// Context errors are not retryable
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// Network timeouts are retryable
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
 
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return false
-	}
-
-	// Handle specific Telegram error codes that are retryable
-	// 429 - Too Many Requests
-	// 500, 502, 503, 504 - Server errors
-	if telegramErr := extractTelegramError(err); telegramErr != nil {
-		code := telegramErr.ErrorCode
-		return code == 429 || code >= 500 && code <= 504
+	// Check for retryable Telegram errors
+	var telegramErr *TelegramError
+	if errors.As(err, &telegramErr) {
+		return telegramErr.IsRetryable()
 	}
 
 	return false
 }
-
-func extractTelegramError(err error) *TelegramResponse {
-	// Check if the error message contains Telegram error information
-	errMsg := err.Error()
-	if strings.Contains(errMsg, "telegram API error") {
-		// This is a best-effort extraction from our formatted error message
-		if strings.Contains(errMsg, "403") {
-			return &TelegramResponse{
-				OK:          false,
-				ErrorCode:   403,
-				Description: "Forbidden",
-			}
-		} else if strings.Contains(errMsg, "429") {
-			return &TelegramResponse{
-				OK:          false,
-				ErrorCode:   429,
-				Description: "Too Many Requests",
-			}
-		} else if strings.Contains(errMsg, "500") ||
-			strings.Contains(errMsg, "502") ||
-			strings.Contains(errMsg, "503") ||
-			strings.Contains(errMsg, "504") {
-			return &TelegramResponse{
-				OK:          false,
-				ErrorCode:   500,
-				Description: "Server Error",
-			}
-		}
-	}
-
-	return nil
-}
-

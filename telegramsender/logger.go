@@ -6,10 +6,26 @@ import (
 	"os"
 )
 
+// Logger wraps slog.Logger and manages the underlying file handle for proper cleanup.
+type Logger struct {
+	*slog.Logger
+	file *os.File
+}
+
+// Close releases the log file handle. Safe to call multiple times or on nil file.
+func (l *Logger) Close() error {
+	if l.file != nil {
+		return l.file.Close()
+	}
+	return nil
+}
+
 // NewLogger creates a production-ready structured logger using Go's built-in log/slog.
 // Logs are output in JSON format to stdout and optionally to a log file.
-func NewLogger(logLevel slog.Level, logFilePath string) (*slog.Logger, error) {
+// The caller MUST call Logger.Close() when done to release the file handle.
+func NewLogger(logLevel slog.Level, logFilePath string) (*Logger, error) {
 	var logOutput io.Writer = os.Stdout
+	var logFile *os.File
 
 	if logFilePath != "" {
 		// Ensure the directory exists
@@ -17,17 +33,11 @@ func NewLogger(logLevel slog.Level, logFilePath string) (*slog.Logger, error) {
 			return nil, err
 		}
 
-		// Open log file with more restrictive permissions (0600)
-		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		var err error
+		logFile, err = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return nil, err
 		}
-		// Ensure the file is closed if there's an error later in this function
-		defer func() {
-			if err != nil {
-				logFile.Close()
-			}
-		}()
 		logOutput = io.MultiWriter(os.Stdout, logFile)
 	}
 
@@ -35,7 +45,9 @@ func NewLogger(logLevel slog.Level, logFilePath string) (*slog.Logger, error) {
 		Level: logLevel,
 	})
 
-	logger := slog.New(handler)
-	return logger, nil
+	return &Logger{
+		Logger: slog.New(handler),
+		file:   logFile,
+	}, nil
 }
 
