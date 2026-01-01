@@ -19,11 +19,11 @@ func ensureLogPath(path string) error {
 
 // ValidateConfig performs pre-flight sanity checks on configuration.
 func ValidateConfig(cfg *Config) error {
-	if cfg.BotToken == "" {
-		return NewConfigError("BOT_TOKEN", "must be set")
+	if cfg.BotToken.Value() == "" {
+		return NewConfigError("TELEGRAM_BOT_TOKEN", "must be set")
 	}
-	if !validateBotToken(cfg.BotToken) {
-		return NewConfigError("BOT_TOKEN", "format is invalid")
+	if !validateBotToken(cfg.BotToken.Value()) {
+		return NewConfigError("TELEGRAM_BOT_TOKEN", "format is invalid")
 	}
 	if cfg.LogFilePath == "" {
 		return NewConfigError("LOG_FILE_PATH", "must be set")
@@ -57,6 +57,16 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if cfg.RateLimitBurst <= 0 {
 		return NewConfigError("RATE_LIMIT_BURST", "must be positive")
+	}
+	return nil
+}
+
+// ValidateBotToken checks if the token has the correct format.
+// Telegram bot tokens follow the pattern: 123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ
+// Returns an error if the token format is invalid.
+func ValidateBotToken(token string) error {
+	if !validateBotToken(token) {
+		return fmt.Errorf("invalid bot token format")
 	}
 	return nil
 }

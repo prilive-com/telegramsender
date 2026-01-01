@@ -1,0 +1,43 @@
+# Example configuration file for telegramsender v3
+# Environment variables (TELEGRAM_*) override these settings
+# Programmatic options override both
+
+# Required: Bot token from @BotFather
+# Set via TELEGRAM_BOT_TOKEN env var (recommended) or bot_token here
+# bot_token: "123456789:ABCdefGHI..."
+
+# API endpoint (rarely needs changing)
+base_url: "https://api.telegram.org"
+
+# HTTP client settings
+request_timeout: 10s
+keep_alive: 30s
+max_idle_conns: 10
+idle_conn_timeout: 90s
+
+# Rate limiting
+rate_limit_requests: 10.0
+rate_limit_burst: 20
+
+# Circuit breaker
+breaker_max_requests: 5
+breaker_interval: 2m
+breaker_timeout: 60s
+
+# Retry settings (exponential backoff)
+max_retries: 3
+retry_initial_backoff: 100ms
+retry_max_backoff: 10s
+retry_backoff_factor: 2.0
+
+# Content limits
+max_caption_length: 1024
+max_file_size: 10485760  # 10MB
+
+# Security: Allowed directories for photo uploads (empty = no restriction)
+# allowed_photo_dirs:
+#   - /app/uploads
+#   - /tmp
+
+# Logging
+log_file_path: "logs/telegramsender.log"

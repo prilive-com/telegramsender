@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sony/gobreaker"
+	"github.com/sony/gobreaker/v2"
 	"golang.org/x/time/rate"
 )
 
@@ -35,7 +35,7 @@ type TelegramAPI struct {
 	globalLimiter *rate.Limiter
 	chatLimiters map[int64]*rate.Limiter
 	limiterMu    sync.RWMutex
-	breaker      *gobreaker.CircuitBreaker
+	breaker      *gobreaker.CircuitBreaker[*TelegramResponse]
 }
 
 // TelegramResponse represents a response from the Telegram API.
@@ -87,6 +87,13 @@ type PhotoFileRequest struct {
 /* ---------- constructor ---------- */
 
 // NewTelegramAPI creates a new TelegramAPI client with the given configuration.
+//
+// Deprecated: Use New() or NewFromConfig() instead for a simpler API.
+// This function will be removed in v4.
+//
+//	client, err := telegramsender.New(token,
+//	    telegramsender.WithMaxRetriesOption(5),
+//	)
 func NewTelegramAPI(logger *Logger, config *Config) *TelegramAPI {
 	// Configure transport with TLS 1.2+ minimum
 	transport := &http.Transport{
@@ -133,7 +140,7 @@ func NewTelegramAPI(logger *Logger, config *Config) *TelegramAPI {
 		httpClient:    httpClient,
 		globalLimiter: rate.NewLimiter(rate.Limit(config.RateLimitRequests), config.RateLimitBurst),
 		chatLimiters:  make(map[int64]*rate.Limiter),
-		breaker:       gobreaker.NewCircuitBreaker(cbSettings),
+		breaker:       gobreaker.NewCircuitBreaker[*TelegramResponse](cbSettings),
 	}
 }
 
@@ -271,7 +278,7 @@ func (t *TelegramAPI) sendMessageOnce(ctx context.Context, request MessageReques
 	}
 
 	// Use circuit breaker
-	resp, err := t.breaker.Execute(func() (interface{}, error) {
+	resp, err := t.breaker.Execute(func() (*TelegramResponse, error) {
 		return t.executeRequest(ctx, MethodSendMessage, request)
 	})
 
@@ -298,7 +305,7 @@ func (t *TelegramAPI) sendPhotoOnce(ctx context.Context, request PhotoRequest) (
 	}
 
 	// Use circuit breaker
-	resp, err := t.breaker.Execute(func() (interface{}, error) {
+	resp, err := t.breaker.Execute(func() (*TelegramResponse, error) {
 		return t.executeRequest(ctx, MethodSendPhoto, request)
 	})
 
@@ -324,7 +331,7 @@ func (t *TelegramAPI) sendPhotoFileOnce(ctx context.Context, request PhotoFileRe
 	}
 
 	// Use circuit breaker
-	resp, err := t.breaker.Execute(func() (interface{}, error) {
+	resp, err := t.breaker.Execute(func() (*TelegramResponse, error) {
 		return t.executeMultipartRequest(ctx, MethodSendPhoto, request)
 	})
 
@@ -338,19 +345,14 @@ func (t *TelegramAPI) sendPhotoFileOnce(ctx context.Context, request PhotoFileRe
 	return t.parseMessageResult(resp)
 }
 
-// parseMessageResult safely parses the response into MessageResult.
-func (t *TelegramAPI) parseMessageResult(resp interface{}) (*MessageResult, error) {
-	telegramResp, ok := resp.(*TelegramResponse)
-	if !ok {
-		return nil, errors.New("unexpected response type from circuit breaker")
-	}
-
-	if !telegramResp.OK {
-		return nil, NewTelegramError(telegramResp.ErrorCode, telegramResp.Description)
+// parseMessageResult parses the response into MessageResult.
+func (t *TelegramAPI) parseMessageResult(resp *TelegramResponse) (*MessageResult, error) {
+	if !resp.OK {
+		return nil, NewTelegramError(resp.ErrorCode, resp.Description)
 	}
 
 	var msgResult MessageResult
-	if err := json.Unmarshal(telegramResp.Result, &msgResult); err != nil {
+	if err := json.Unmarshal(resp.Result, &msgResult); err != nil {
 		return nil, fmt.Errorf("failed to parse result: %w", err)
 	}
 
@@ -393,7 +395,7 @@ func (t *TelegramAPI) executeRequest(ctx context.Context, method string, payload
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken, method)
+	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken.Value(), method)
 	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
@@ -467,7 +469,7 @@ func (t *TelegramAPI) executeMultipartRequest(ctx context.Context, method string
 		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken, method)
+	url := fmt.Sprintf("%s/bot%s/%s", t.config.BaseURL, t.config.BotToken.Value(), method)
 	redactedURL := fmt.Sprintf("%s/bot[REDACTED]/%s", t.config.BaseURL, method)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)

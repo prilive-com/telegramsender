@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-01-01
+
+### Added
+
+- **v3 API** - Simplified configuration with modern Go library patterns
+  - `New(token, opts...)` - Simple programmatic constructor
+  - `NewFromConfig(path, opts...)` - Multi-source config (file + env + options)
+  - `Client` type with `SendMessage()`, `SendPhoto()`, `SendPhotoFile()`, `Close()`, `Config()`, `API()`
+  - Interface-based `Option` pattern for type-safe configuration
+  - Client implements `Sender` interface
+
+- **Configuration Options** (v3)
+  - `WithBaseURLOption(url)` - Custom base URL
+  - `WithRequestTimeoutOption(d)` - HTTP request timeout
+  - `WithKeepAliveOption(d)` - HTTP keep-alive duration
+  - `WithConnectionPool(maxIdle, timeout)` - Connection pool settings
+  - `WithRateLimitOption(rps, burst)` - Rate limiting settings
+  - `WithBreakerConfig(maxReq, interval, timeout)` - Circuit breaker
+  - `WithRetryOption(max, initial, maxBackoff, factor)` - Retry settings
+  - `WithMaxRetriesOption(n)` - Max retries shorthand
+  - `WithContentLimitsOption(caption, fileSize)` - Content limits
+  - `WithAllowedPhotoDirsOption(dirs...)` - Security restrictions
+  - `WithLogger(logger)` - Custom slog.Logger
+  - `WithLogFile(path)` - Log file path
+  - `WithHTTPClientOption(client)` - Custom HTTP client for testing
+
+- **Presets** (v3)
+  - `ProductionPreset()` - Production-optimized settings
+  - `DevelopmentPreset()` - Development-friendly settings
+  - `HighThroughputPreset()` - High-throughput scenarios
+
+- **Multi-source Configuration**
+  - koanf-based configuration loading
+  - Precedence: defaults → config file → env vars (TELEGRAM_*) → programmatic options
+  - YAML config file support
+
+- **Validation**
+  - go-playground/validator integration
+  - Public `ValidateBotToken()` function
+  - Actionable error messages with remediation hints
+
+- **New Files**
+  - `client.go` - v3 Client type and constructors
+  - `options.go` - Option interface and With* functions
+  - `client_test.go` - Tests for v3 API (with .env file support)
+  - `example/v3/main.go` - v3 API example
+  - `example/v3/config.yaml` - Example config file
+
+- **Dependencies**
+  - `github.com/knadh/koanf/v2` - Multi-source configuration
+  - `github.com/go-playground/validator/v10` - Struct validation
+  - `github.com/joho/godotenv` - Load .env files in tests
+
+### Deprecated
+
+- `NewConfig()` - Use `New()` instead
+- `LoadConfig()` - Use `NewFromConfig()` instead
+- `NewTelegramAPI()` - Use `New()` instead
+
+All deprecated functions will be removed in v4.
+
 ## [2.0.0] - 2025-12-07
 
 ### Breaking Changes

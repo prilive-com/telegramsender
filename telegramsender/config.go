@@ -10,7 +10,7 @@ import (
 // Config holds all configuration for the Telegram API client.
 type Config struct {
 	// API configuration
-	BotToken string
+	BotToken SecretToken
 	BaseURL  string
 
 	// HTTP client settings
@@ -50,9 +50,17 @@ type ConfigOption func(*Config)
 
 // NewConfig creates a new Config with the given bot token and options.
 // Use this for programmatic configuration instead of environment variables.
+//
+// Deprecated: Use New() instead for a simpler API that returns a ready-to-use Client.
+// This function will be removed in v4.
+//
+//	client, err := telegramsender.New(token,
+//	    telegramsender.WithMaxRetriesOption(5),
+//	    telegramsender.WithRateLimitOption(30, 50),
+//	)
 func NewConfig(botToken string, opts ...ConfigOption) *Config {
 	cfg := &Config{
-		BotToken:            botToken,
+		BotToken:            SecretToken(botToken),
 		BaseURL:             DefaultBaseURL,
 		RequestTimeout:      DefaultRequestTimeout,
 		KeepAlive:           DefaultKeepAlive,
@@ -156,6 +164,9 @@ func WithLogFilePath(path string) ConfigOption {
 
 // LoadConfig loads configuration from environment variables.
 // For programmatic configuration, use NewConfig instead.
+//
+// Deprecated: Use NewFromConfig() instead for multi-source configuration.
+// This function will be removed in v4.
 func LoadConfig() (*Config, error) {
 	rateLimitRequests, err := parseEnvFloat("RATE_LIMIT_REQUESTS", DefaultRateLimitRequests)
 	if err != nil {
@@ -233,7 +244,7 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return &Config{
-		BotToken: getEnv("BOT_TOKEN", ""),
+		BotToken: SecretToken(getEnv("TELEGRAM_BOT_TOKEN", "")),
 		BaseURL:  getEnv("BASE_URL", DefaultBaseURL),
 
 		RequestTimeout:  requestTimeout,

@@ -1,6 +1,8 @@
 # telegramsender v2
 
 > **Note**: v1.x is deprecated. Please use v2 for all new projects. See [MIGRATION.md](MIGRATION.md) for upgrade guide.
+>
+> **New in v2.3**: Simplified configuration API with `New()` and `NewFromConfig()`. See [v3 API](#v3-api-simplified-configuration) below.
 
 **telegramsender** is a production-ready Go library for sending Telegram bot messages with resilience, security, and observability features.
 
@@ -76,7 +78,107 @@ func main() {
 }
 ```
 
-## Programmatic Configuration
+## v3 API (Simplified Configuration)
+
+The new v3 API provides a cleaner interface with support for programmatic options, environment variables, and config files with proper precedence.
+
+### Simple Usage
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "os"
+    "time"
+
+    "github.com/prilive-com/telegramsender/v2/telegramsender"
+)
+
+func main() {
+    token := os.Getenv("TELEGRAM_BOT_TOKEN")
+
+    // Create client with options
+    client, err := telegramsender.New(token,
+        telegramsender.WithMaxRetriesOption(5),
+        telegramsender.WithRateLimitOption(30, 50),
+        telegramsender.ProductionPreset(),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
+
+    // Send message
+    ctx := context.Background()
+    result, err := client.SendMessage(ctx, telegramsender.MessageRequest{
+        ChatID:    123456789,
+        Text:      "Hello from v3 API!",
+        ParseMode: "HTML",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Message sent, ID: %d", result.MessageID)
+}
+```
+
+### From Config File + Env Vars
+
+```go
+// Configuration precedence (highest to lowest):
+// 1. Programmatic options (opts...)
+// 2. Environment variables (TELEGRAM_*)
+// 3. Config file
+// 4. Default values
+
+client, err := telegramsender.NewFromConfig("config.yaml",
+    telegramsender.WithLogger(customLogger),  // Override from config
+)
+```
+
+### Available Options
+
+```go
+// HTTP settings
+telegramsender.WithRequestTimeoutOption(10*time.Second)
+telegramsender.WithConnectionPool(50, 120*time.Second)
+
+// Rate limiting
+telegramsender.WithRateLimitOption(30, 50)  // requests/sec, burst
+
+// Circuit breaker
+telegramsender.WithBreakerConfig(5, 2*time.Minute, 60*time.Second)
+
+// Retry settings (exponential backoff)
+telegramsender.WithRetryOption(5, 200*time.Millisecond, 30*time.Second, 2.0)
+telegramsender.WithMaxRetriesOption(5)
+
+// Content limits
+telegramsender.WithContentLimitsOption(1024, 10*1024*1024)
+
+// Security
+telegramsender.WithAllowedPhotoDirsOption("/app/uploads", "/tmp")
+
+// Logging
+telegramsender.WithLogger(slogLogger)
+telegramsender.WithLogFile("logs/bot.log")
+
+// Testing
+telegramsender.WithHTTPClientOption(mockClient)
+
+// Presets
+telegramsender.ProductionPreset()
+telegramsender.DevelopmentPreset()
+telegramsender.HighThroughputPreset()
+```
+
+---
+
+## Programmatic Configuration (Legacy)
+
+> **Deprecated**: Use `New()` instead. This API will be removed in v4.
 
 ```go
 cfg := telegramsender.NewConfig(
