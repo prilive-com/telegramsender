@@ -15,6 +15,18 @@ const (
 
 	// MaxResponseSize is the maximum size of an API response we'll read (10MB)
 	MaxResponseSize = 10 * 1024 * 1024
+
+	// MaxCallbackDataLength is the maximum length of callback_data in bytes (Telegram limit)
+	MaxCallbackDataLength = 64
+
+	// MaxCallbackAnswerTextLength is the maximum length of callback answer text (Telegram limit)
+	MaxCallbackAnswerTextLength = 200
+
+	// MaxInlineKeyboardRows is the maximum number of rows in inline keyboard (Telegram limit)
+	MaxInlineKeyboardRows = 100
+
+	// MaxInlineKeyboardButtonsPerRow is the maximum buttons per row (Telegram limit)
+	MaxInlineKeyboardButtonsPerRow = 8
 )
 
 // HTTP client defaults
@@ -111,6 +123,36 @@ var AllowedBaseURLHosts = []string{
 
 // Telegram API method names
 const (
+	// Send methods
 	MethodSendMessage = "sendMessage"
 	MethodSendPhoto   = "sendPhoto"
+
+	// Edit methods
+	MethodEditMessageText        = "editMessageText"
+	MethodEditMessageCaption     = "editMessageCaption"
+	MethodEditMessageMedia       = "editMessageMedia"
+	MethodEditMessageReplyMarkup = "editMessageReplyMarkup"
+
+	// Message management
+	MethodDeleteMessage  = "deleteMessage"
+	MethodForwardMessage = "forwardMessage"
+	MethodCopyMessage    = "copyMessage"
+
+	// Callback
+	MethodAnswerCallbackQuery = "answerCallbackQuery"
+)
+
+// ParseMode constants for message formatting
+const (
+	ParseModeHTML       = "HTML"
+	ParseModeMarkdown   = "Markdown"
+	ParseModeMarkdownV2 = "MarkdownV2"
+)
+
+// ChatType constants
+const (
+	ChatTypePrivate    = "private"
+	ChatTypeGroup      = "group"
+	ChatTypeSupergroup = "supergroup"
+	ChatTypeChannel    = "channel"
 )

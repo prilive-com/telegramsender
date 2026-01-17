@@ -2,7 +2,7 @@
 
 > **Note**: v1.x is deprecated. Please use v2 for all new projects. See [MIGRATION.md](MIGRATION.md) for upgrade guide.
 >
-> **New in v2.3**: Simplified configuration API with `New()` and `NewFromConfig()`. See [v3 API](#v3-api-simplified-configuration) below.
+> **New in v2.4**: Edit, Delete, Forward, Copy messages + Callback query handling + Inline keyboards. See [Message Operations](#message-operations) below.
 
 **telegramsender** is a production-ready Go library for sending Telegram bot messages with resilience, security, and observability features.
 
@@ -11,9 +11,12 @@
 | Feature | Description |
 |---------|-------------|
 | **Message Types** | Text messages, photos (URL/file_id), local file uploads |
+| **Message Operations** | Edit, delete, forward, copy messages with `Editable` interface |
+| **Inline Keyboards** | Fluent keyboard builder, button constructors, pagination helpers |
+| **Callback Queries** | Answer callbacks with alerts, notifications, or silent acknowledgment |
 | **Resilience** | Retry with exponential backoff, circuit breaker, per-chat rate limiting |
 | **Security** | TLS 1.2+, path traversal protection, URL whitelist, response size limits |
-| **Testability** | `Sender` interface for mocking, typed errors with `errors.As()` support |
+| **Testability** | `Bot` interface for mocking, typed errors with `errors.Is()` support |
 | **Observability** | Structured JSON logging via `log/slog` |
 | **Configuration** | Environment variables or programmatic with functional options |
 
@@ -176,6 +179,85 @@ telegramsender.HighThroughputPreset()
 
 ---
 
+## Message Operations
+
+### Edit Messages
+
+```go
+// Edit text using Editable interface
+msg, err := client.Edit(ctx, message, "Updated text",
+    telegramsender.WithEditParseMode("HTML"),
+    telegramsender.WithEditKeyboard(keyboard),
+)
+
+// Edit caption
+msg, err := client.EditCaption(ctx, message, "New caption")
+
+// Edit keyboard only
+msg, err := client.EditReplyMarkup(ctx, message, newKeyboard)
+
+// Using stored message reference
+stored := telegramsender.StoredMessage{MsgID: 123, ChatID: 456}
+msg, err := client.Edit(ctx, stored, "Updated!")
+```
+
+### Delete, Forward, Copy
+
+```go
+// Delete a message
+ok, err := client.Delete(ctx, message)
+
+// Forward to another chat
+fwd, err := client.Forward(ctx, message, targetChatID,
+    telegramsender.Silent(),
+    telegramsender.Protected(),
+)
+
+// Copy without "forwarded from" header
+copied, err := client.Copy(ctx, message, targetChatID,
+    telegramsender.WithCopyCaption("New caption"),
+)
+```
+
+### Inline Keyboards
+
+```go
+// Fluent builder
+kb := telegramsender.NewKeyboard().
+    Row(telegramsender.Btn("Option 1", "opt:1"), telegramsender.Btn("Option 2", "opt:2")).
+    Row(telegramsender.BtnURL("Visit", "https://example.com")).
+    Build()
+
+// Quick helpers
+confirm := telegramsender.Confirm("yes:123", "no:123")
+pagination := telegramsender.Pagination(2, 10, "page")
+
+// Generic grid from data
+items := []string{"A", "B", "C", "D"}
+grid := telegramsender.Grid(items, 2, func(s string) telegramsender.InlineKeyboardButton {
+    return telegramsender.Btn(s, "item:"+s)
+})
+```
+
+### Callback Queries
+
+```go
+// Answer with notification
+client.Answer(ctx, callback, telegramsender.AnswerText("Done!"))
+
+// Answer with alert dialog
+client.Answer(ctx, callback, telegramsender.AnswerText("Error!"), telegramsender.Alert)
+
+// Silent acknowledgment (removes loading indicator)
+client.Acknowledge(ctx, callback)
+
+// Shorthand methods
+client.NotifyText(ctx, callback, "Saved!")
+client.AlertText(ctx, callback, "Are you sure?")
+```
+
+---
+
 ## Programmatic Configuration (Legacy)
 
 > **Deprecated**: Use `New()` instead. This API will be removed in v4.
@@ -192,47 +274,69 @@ cfg := telegramsender.NewConfig(
 
 ## Error Handling
 
-v2 provides typed errors for proper error handling:
+v2 provides typed errors with `errors.Is()` support for semantic error matching:
 
 ```go
 result, err := api.SendMessage(ctx, request)
 if err != nil {
+    // Telegram API errors automatically map to sentinel errors
+    if errors.Is(err, telegramsender.ErrMessageNotFound) {
+        log.Println("Message was deleted")
+    }
+    if errors.Is(err, telegramsender.ErrBotBlocked) {
+        log.Println("User blocked the bot")
+    }
+    if errors.Is(err, telegramsender.ErrRateLimitExceeded) {
+        log.Println("Rate limit exceeded")
+    }
+
+    // Access full error details
     var telegramErr *telegramsender.TelegramError
     if errors.As(err, &telegramErr) {
-        log.Printf("Telegram error %d: %s", telegramErr.Code, telegramErr.Description)
+        log.Printf("Code %d: %s", telegramErr.Code, telegramErr.Description)
         if telegramErr.RetryAfter > 0 {
-            log.Printf("Retry after: %v", telegramErr.RetryAfter)
+            time.Sleep(telegramErr.RetryAfter)
         }
-    }
-
-    var validationErr *telegramsender.ValidationError
-    if errors.As(err, &validationErr) {
-        log.Printf("Validation failed on %s: %s", validationErr.Field, validationErr.Message)
-    }
-
-    // Sentinel errors
-    if errors.Is(err, telegramsender.ErrRateLimitExceeded) {
-        // Handle rate limit
     }
 }
 ```
 
+### Available Sentinel Errors
+
+| Category | Errors |
+|----------|--------|
+| **Messages** | `ErrMessageNotFound`, `ErrMessageNotModified`, `ErrMessageCantBeEdited`, `ErrMessageCantBeDeleted`, `ErrMessageTooOld` |
+| **Callbacks** | `ErrInvalidCallbackData`, `ErrCallbackQueryExpired` |
+| **Chat/User** | `ErrChatNotFound`, `ErrBotKicked`, `ErrBotBlocked`, `ErrUserDeactivated`, `ErrNoRights` |
+| **System** | `ErrRateLimitExceeded`, `ErrCircuitBreakerOpen`, `ErrMaxRetriesExceeded` |
+
 ## Testing with Mocks
 
+Use the `Bot` interface (or individual interfaces) for testing:
+
 ```go
-type MockSender struct {
-    Messages []telegramsender.MessageRequest
+// Bot combines Sender + Editor + Manager + Responder
+type NotificationService struct {
+    bot telegramsender.Bot
 }
 
-func (m *MockSender) SendMessage(ctx context.Context, req telegramsender.MessageRequest) (*telegramsender.MessageResult, error) {
-    m.Messages = append(m.Messages, req)
+// Or use specific interfaces
+type MessageEditor struct {
+    editor telegramsender.Editor
+}
+
+// Mock implementation
+type MockBot struct{}
+
+func (m *MockBot) SendMessage(ctx context.Context, req telegramsender.MessageRequest) (*telegramsender.MessageResult, error) {
     return &telegramsender.MessageResult{MessageID: 123}, nil
 }
 
-// Use in your service
-type NotificationService struct {
-    sender telegramsender.Sender // Interface
+func (m *MockBot) Edit(ctx context.Context, msg telegramsender.Editable, text string, opts ...telegramsender.EditOption) (*telegramsender.Message, error) {
+    return &telegramsender.Message{MessageID: 123}, nil
 }
+
+// ... implement other interface methods
 ```
 
 ## Environment Variables

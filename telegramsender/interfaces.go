@@ -5,21 +5,63 @@ import (
 	"net/http"
 )
 
-// Sender defines the interface for sending Telegram messages.
-// This interface allows for easy mocking in tests.
+// Sender sends messages (original interface for backward compatibility).
 type Sender interface {
-	// SendMessage sends a text message to the specified chat
-	SendMessage(ctx context.Context, request MessageRequest) (*MessageResult, error)
-
-	// SendPhoto sends a photo by URL or file_id to the specified chat
-	SendPhoto(ctx context.Context, request PhotoRequest) (*MessageResult, error)
-
-	// SendPhotoFile sends a local photo file to the specified chat
-	SendPhotoFile(ctx context.Context, request PhotoFileRequest) (*MessageResult, error)
+	SendMessage(ctx context.Context, req MessageRequest) (*MessageResult, error)
+	SendPhoto(ctx context.Context, req PhotoRequest) (*MessageResult, error)
+	SendPhotoFile(ctx context.Context, req PhotoFileRequest) (*MessageResult, error)
 }
 
-// Ensure TelegramAPI implements Sender at compile time
-var _ Sender = (*TelegramAPI)(nil)
+// Editor edits messages.
+type Editor interface {
+	EditMessageText(ctx context.Context, req EditMessageTextRequest) (*Message, error)
+	EditMessageCaption(ctx context.Context, req EditMessageCaptionRequest) (*Message, error)
+	EditMessageReplyMarkup(ctx context.Context, req EditMessageReplyMarkupRequest) (*Message, error)
+
+	// Convenience methods
+	Edit(ctx context.Context, msg Editable, text string, opts ...EditOption) (*Message, error)
+	EditCaption(ctx context.Context, msg Editable, caption string, opts ...EditCaptionOption) (*Message, error)
+	EditReplyMarkup(ctx context.Context, msg Editable, markup *InlineKeyboardMarkup) (*Message, error)
+}
+
+// Manager manages messages (delete, forward, copy).
+type Manager interface {
+	DeleteMessage(ctx context.Context, req DeleteMessageRequest) (bool, error)
+	ForwardMessage(ctx context.Context, req ForwardMessageRequest) (*Message, error)
+	CopyMessage(ctx context.Context, req CopyMessageRequest) (*MessageID, error)
+
+	// Convenience methods
+	Delete(ctx context.Context, msg Editable) (bool, error)
+	Forward(ctx context.Context, msg Editable, to ChatID, opts ...ForwardOption) (*Message, error)
+	Copy(ctx context.Context, msg Editable, to ChatID, opts ...CopyOption) (*MessageID, error)
+}
+
+// Responder answers callback queries.
+type Responder interface {
+	AnswerCallbackQuery(ctx context.Context, req AnswerCallbackQueryRequest) (bool, error)
+
+	// Convenience methods
+	Answer(ctx context.Context, cb *CallbackQuery, opts ...AnswerOption) (bool, error)
+	Respond(ctx context.Context, cb *CallbackQuery, opts ...AnswerOption) (bool, error)
+	Acknowledge(ctx context.Context, cb *CallbackQuery) (bool, error)
+}
+
+// Bot combines all Telegram Bot API interfaces.
+type Bot interface {
+	Sender
+	Editor
+	Manager
+	Responder
+}
+
+// Compile-time interface checks
+var (
+	_ Sender    = (*TelegramAPI)(nil)
+	_ Editor    = (*TelegramAPI)(nil)
+	_ Manager   = (*TelegramAPI)(nil)
+	_ Responder = (*TelegramAPI)(nil)
+	_ Bot       = (*TelegramAPI)(nil)
+)
 
 // HTTPClient is an interface for HTTP client operations.
 // This allows for mocking HTTP calls in tests.

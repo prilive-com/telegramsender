@@ -17,12 +17,12 @@ func TestTelegramError_Error(t *testing.T) {
 		{
 			name:       "basic error",
 			err:        telegramsender.NewTelegramError(400, "Bad Request"),
-			wantSubstr: "400",
+			wantSubstr: "code=400",
 		},
 		{
 			name:       "error with retry after",
 			err:        telegramsender.NewTelegramErrorWithRetry(429, "Too Many Requests", 30*time.Second),
-			wantSubstr: "retry after",
+			wantSubstr: "retry_after=",
 		},
 	}
 
@@ -40,8 +40,10 @@ func TestTelegramError_Error(t *testing.T) {
 }
 
 func TestTelegramError_Is(t *testing.T) {
-	err429 := telegramsender.NewTelegramError(429, "Too Many Requests")
-	err400 := telegramsender.NewTelegramError(400, "Bad Request")
+	// New behavior: errors.Is() matches against sentinel errors via Unwrap()
+	errMessageNotFound := telegramsender.NewTelegramError(400, "Bad Request: message to edit not found")
+	errChatNotFound := telegramsender.NewTelegramError(400, "Bad Request: chat not found")
+	errGeneric := telegramsender.NewTelegramError(400, "Bad Request")
 
 	tests := []struct {
 		name   string
@@ -50,20 +52,26 @@ func TestTelegramError_Is(t *testing.T) {
 		want   bool
 	}{
 		{
-			name:   "same error code matches",
-			err:    err429,
-			target: telegramsender.NewTelegramError(429, "Different message"),
+			name:   "message not found matches sentinel",
+			err:    errMessageNotFound,
+			target: telegramsender.ErrMessageNotFound,
 			want:   true,
 		},
 		{
-			name:   "different error code no match",
-			err:    err429,
-			target: err400,
+			name:   "chat not found matches sentinel",
+			err:    errChatNotFound,
+			target: telegramsender.ErrChatNotFound,
+			want:   true,
+		},
+		{
+			name:   "generic error does not match specific sentinel",
+			err:    errGeneric,
+			target: telegramsender.ErrMessageNotFound,
 			want:   false,
 		},
 		{
 			name:   "non-telegram error no match",
-			err:    err429,
+			err:    errMessageNotFound,
 			target: errors.New("some error"),
 			want:   false,
 		},
@@ -166,6 +174,7 @@ func TestSentinelErrors(t *testing.T) {
 		name string
 		err  error
 	}{
+		// Common errors
 		{"ErrInvalidConfig", telegramsender.ErrInvalidConfig},
 		{"ErrRateLimitExceeded", telegramsender.ErrRateLimitExceeded},
 		{"ErrCircuitBreakerOpen", telegramsender.ErrCircuitBreakerOpen},
@@ -174,6 +183,21 @@ func TestSentinelErrors(t *testing.T) {
 		{"ErrPathTraversal", telegramsender.ErrPathTraversal},
 		{"ErrResponseTooLarge", telegramsender.ErrResponseTooLarge},
 		{"ErrInvalidBaseURL", telegramsender.ErrInvalidBaseURL},
+		// Message errors
+		{"ErrMessageNotFound", telegramsender.ErrMessageNotFound},
+		{"ErrMessageNotModified", telegramsender.ErrMessageNotModified},
+		{"ErrMessageCantBeEdited", telegramsender.ErrMessageCantBeEdited},
+		{"ErrMessageCantBeDeleted", telegramsender.ErrMessageCantBeDeleted},
+		{"ErrMessageTooOld", telegramsender.ErrMessageTooOld},
+		// Callback errors
+		{"ErrInvalidCallbackData", telegramsender.ErrInvalidCallbackData},
+		{"ErrCallbackQueryExpired", telegramsender.ErrCallbackQueryExpired},
+		// Chat/user errors
+		{"ErrChatNotFound", telegramsender.ErrChatNotFound},
+		{"ErrBotKicked", telegramsender.ErrBotKicked},
+		{"ErrBotBlocked", telegramsender.ErrBotBlocked},
+		{"ErrUserDeactivated", telegramsender.ErrUserDeactivated},
+		{"ErrNoRights", telegramsender.ErrNoRights},
 	}
 
 	for _, tt := range tests {
@@ -183,6 +207,42 @@ func TestSentinelErrors(t *testing.T) {
 			}
 			if tt.err.Error() == "" {
 				t.Error("Sentinel error should have message")
+			}
+		})
+	}
+}
+
+func TestDetectSentinel(t *testing.T) {
+	tests := []struct {
+		description string
+		wantErr     error
+	}{
+		{"Bad Request: message to edit not found", telegramsender.ErrMessageNotFound},
+		{"Bad Request: message to delete not found", telegramsender.ErrMessageNotFound},
+		{"Bad Request: message is not modified", telegramsender.ErrMessageNotModified},
+		{"Bad Request: message can't be edited", telegramsender.ErrMessageCantBeEdited},
+		{"Bad Request: message can't be deleted", telegramsender.ErrMessageCantBeDeleted},
+		{"Forbidden: bot was kicked from the group chat", telegramsender.ErrBotKicked},
+		{"Forbidden: bot was blocked by the user", telegramsender.ErrBotBlocked},
+		{"Bad Request: chat not found", telegramsender.ErrChatNotFound},
+		{"Bad Request: query is too old", telegramsender.ErrCallbackQueryExpired},
+		{"Bad Request: BUTTON_DATA_INVALID", telegramsender.ErrInvalidCallbackData},
+		{"Bad Request: not enough rights to send text messages", telegramsender.ErrNoRights},
+		{"Bad Request: user is deactivated", telegramsender.ErrUserDeactivated},
+		{"Bad Request: some unknown error", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			err := telegramsender.NewTelegramError(400, tt.description)
+			if tt.wantErr == nil {
+				if err.Cause != nil {
+					t.Errorf("expected nil Cause, got %v", err.Cause)
+				}
+			} else {
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("errors.Is() = false, want true for %v", tt.wantErr)
+				}
 			}
 		})
 	}
