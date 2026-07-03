@@ -2,6 +2,7 @@ package telegramsender
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -42,7 +43,8 @@ type Config struct {
 	AllowedPhotoDirs []string // Allowed directories for photo uploads (empty = no restriction)
 
 	// Logging
-	LogFilePath string
+	LogFilePath    string       // File path for logging (ignored if ExternalLogger is set)
+	ExternalLogger *slog.Logger // Optional external logger (takes precedence over LogFilePath)
 }
 
 // ConfigOption is a functional option for configuring Config.
@@ -152,6 +154,13 @@ func WithAllowedPhotoDirs(dirs ...string) ConfigOption {
 // WithLogFilePath sets the log file path.
 func WithLogFilePath(path string) ConfigOption {
 	return func(c *Config) { c.LogFilePath = path }
+}
+
+// WithExternalLogger sets an external slog.Logger to use instead of creating a file-based logger.
+// When an external logger is provided, LogFilePath is ignored.
+// This is useful for integrating with existing application logging infrastructure.
+func WithExternalLogger(logger *slog.Logger) ConfigOption {
+	return func(c *Config) { c.ExternalLogger = logger }
 }
 
 // LoadConfig loads configuration from environment variables.

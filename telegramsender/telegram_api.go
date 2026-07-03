@@ -575,3 +575,112 @@ func (t *TelegramAPI) isRetryable(err error) bool {
 
 	return false
 }
+
+/* ---------- health check ---------- */
+
+// GetMeResponse represents the response from Telegram's getMe endpoint.
+type GetMeResponse struct {
+	ID        int64  `json:"id"`
+	IsBot     bool   `json:"is_bot"`
+	FirstName string `json:"first_name"`
+	Username  string `json:"username"`
+}
+
+// HealthCheck verifies connectivity to the Telegram API by calling the getMe endpoint.
+// This is useful for health checks and readiness probes.
+// Returns nil if the bot token is valid and the API is reachable.
+func (t *TelegramAPI) HealthCheck(ctx context.Context) error {
+	if err := ValidateConfig(t.config); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/bot%s/getMe", t.config.BaseURL, t.config.BotToken)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("health check request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health check failed: status %d", resp.StatusCode)
+	}
+
+	// Parse response to verify it's a valid Telegram response
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
+	if err != nil {
+		return fmt.Errorf("failed to read health check response: %w", err)
+	}
+
+	var telegramResp TelegramResponse
+	if err := json.Unmarshal(body, &telegramResp); err != nil {
+		return fmt.Errorf("failed to parse health check response: %w", err)
+	}
+
+	if !telegramResp.OK {
+		return fmt.Errorf("health check failed: %s (code: %d)", telegramResp.Description, telegramResp.ErrorCode)
+	}
+
+	// Optionally parse the bot info (for logging/debugging)
+	var botInfo GetMeResponse
+	if err := json.Unmarshal(telegramResp.Result, &botInfo); err != nil {
+		return fmt.Errorf("failed to parse bot info: %w", err)
+	}
+
+	t.logger.Debug("health check passed",
+		"bot_id", botInfo.ID,
+		"bot_username", botInfo.Username)
+
+	return nil
+}
+
+// GetBotInfo returns information about the bot by calling the getMe endpoint.
+// This is useful for verifying the bot configuration and getting the bot's username.
+func (t *TelegramAPI) GetBotInfo(ctx context.Context) (*GetMeResponse, error) {
+	if err := ValidateConfig(t.config); err != nil {
+		return nil, fmt.Errorf("config validation failed: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/bot%s/getMe", t.config.BaseURL, t.config.BotToken)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var telegramResp TelegramResponse
+	if err := json.Unmarshal(body, &telegramResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !telegramResp.OK {
+		return nil, NewTelegramError(telegramResp.ErrorCode, telegramResp.Description)
+	}
+
+	var botInfo GetMeResponse
+	if err := json.Unmarshal(telegramResp.Result, &botInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse bot info: %w", err)
+	}
+
+	return &botInfo, nil
+}

@@ -9,15 +9,31 @@ import (
 // Logger wraps slog.Logger and manages the underlying file handle for proper cleanup.
 type Logger struct {
 	*slog.Logger
-	file *os.File
+	file       *os.File
+	isExternal bool // true if using external logger (don't close anything)
 }
 
 // Close releases the log file handle. Safe to call multiple times or on nil file.
+// If the logger was created from an external logger, this is a no-op.
 func (l *Logger) Close() error {
+	if l.isExternal {
+		return nil
+	}
 	if l.file != nil {
 		return l.file.Close()
 	}
 	return nil
+}
+
+// NewLoggerFromExternal wraps an existing slog.Logger for use with TelegramAPI.
+// This allows integrating with existing application logging infrastructure.
+// Close() is a no-op when using an external logger.
+func NewLoggerFromExternal(logger *slog.Logger) *Logger {
+	return &Logger{
+		Logger:     logger,
+		file:       nil,
+		isExternal: true,
+	}
 }
 
 // NewLogger creates a production-ready structured logger using Go's built-in log/slog.
@@ -46,8 +62,9 @@ func NewLogger(logLevel slog.Level, logFilePath string) (*Logger, error) {
 	})
 
 	return &Logger{
-		Logger: slog.New(handler),
-		file:   logFile,
+		Logger:     slog.New(handler),
+		file:       logFile,
+		isExternal: false,
 	}, nil
 }
 

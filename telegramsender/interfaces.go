@@ -16,6 +16,9 @@ type Sender interface {
 
 	// SendPhotoFile sends a local photo file to the specified chat
 	SendPhotoFile(ctx context.Context, request PhotoFileRequest) (*MessageResult, error)
+
+	// HealthCheck verifies connectivity to the Telegram API
+	HealthCheck(ctx context.Context) error
 }
 
 // Ensure TelegramAPI implements Sender at compile time
